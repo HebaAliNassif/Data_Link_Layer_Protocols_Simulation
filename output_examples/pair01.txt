@@ -1,0 +1,2 @@
+node0 sends message with id=0 and content='$A flower, sometimes known as a bloom or blossom$' at 3.000000 with modification
+node1 received message with id=0 and content='$A flower, sometimes known as a bloom or bloósom$' at 3.200000 with modification
