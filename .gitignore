@@ -32,3 +32,11 @@
 *.app
 
 out
+
+*.settings
+*.vscode
+
+.metadata/
+.settings/
+out/
+.exe
