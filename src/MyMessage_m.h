@@ -37,6 +37,7 @@ typedef  std::bitset<8> bits;
  *     int Piggybacking;
  *     int Piggybacking_ID;
  *     string Message_Payload;
+ *     int event;
  * }
  * </pre>
  *
@@ -73,6 +74,7 @@ class MyMessage_Base : public ::omnetpp::cPacket
     int Piggybacking;
     int Piggybacking_ID;
     ::omnetpp::opp_string Message_Payload;
+    int event;
 
   private:
     void copy(const MyMessage_Base& other);
@@ -86,9 +88,8 @@ class MyMessage_Base : public ::omnetpp::cPacket
 
   public:
     // make constructors protected to avoid instantiation
-    MyMessage_Base(const char *name=nullptr, short kind=0);
-   MyMessage_Base(const MyMessage_Base& other);
-
+        MyMessage_Base(const char *name=nullptr, short kind=0);
+        MyMessage_Base(const MyMessage_Base& other);
     virtual ~MyMessage_Base();
     virtual MyMessage_Base *dup() const override {return new MyMessage_Base(*this);}
     virtual void parsimPack(omnetpp::cCommBuffer *b) const override;
@@ -108,6 +109,8 @@ class MyMessage_Base : public ::omnetpp::cPacket
     virtual void setPiggybacking_ID(int Piggybacking_ID);
     virtual const char * getMessage_Payload() const;
     virtual void setMessage_Payload(const char * Message_Payload);
+    virtual int getEvent() const;
+    virtual void setEvent(int event);
 };
 
 

@@ -23,6 +23,9 @@ simple Node
     double delay_amount;
     double prop_delay;
     double timeout;
+    int window_size;
+    double timeout_ack;
+    double interval_between_msgs;
      gates:
         input in_pair;
         input in_coordinator;

@@ -28,4 +28,5 @@ packet MyMessage {
     int Piggybacking;
     int Piggybacking_ID;
     string Message_Payload;
+    int event;
 }

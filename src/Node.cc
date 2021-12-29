@@ -22,23 +22,37 @@
 #include <cstring>
 #include <stdio.h>
 #include <conio.h>
-using std::cout; using std::ofstream;
-using std::endl; using std::string;
 using std::cerr;
+using std::cout;
+using std::endl;
 using std::fstream;
+using std::ofstream;
+using std::string;
 using namespace std;
-
+bool no_nak = true;
 Define_Module(Node);
-
 void Node::initialize()
 {
     // TODO - Generated method body
+    nr_bufs = par("window_size").intValue();
+    max_seq_number = 2 * nr_bufs - 1;
+    ack_expected = 0;
+    next_frame_to_send = 0;
+    frame_expected = 0;
+    too_far = nr_bufs;
+    nbuffered = 0;
+    for (int i = 0; i < nr_bufs; i++)
+    {
+        arrived.push_back(false);
+        out_buf.push_back(std::pair<std::string, std::string>());
+        in_buf.push_back(new MyMessage_Base());
+    }
+    ack_timer = nullptr;
 }
 
 void Node::handleMessage(cMessage *msg)
 {
     MyMessage_Base *received_msg = check_and_cast<MyMessage_Base *>(msg);
-
     if (received_msg->getMessage_ID() == -1) // Message from coordinator for initialization
     {
         string received_msg_payload = received_msg->getMessage_Payload();
@@ -48,85 +62,250 @@ void Node::handleMessage(cMessage *msg)
         index = received_msg->getArrivalModuleId() - 2;
         expected_total_transmissions = messages.size();
 
-        initializeFile();       // initialize output file
+        initializeFile(); // initialize output file
 
         if (fields.size() > 2) // The pair which will start the simulation, so set the simulation start time
         {
             int start_time = std::atoi(fields[3].c_str());
             start_transmission_time = start_time;
-            MyMessage_Base *msg_to_send = prepareMessageToSend("Invoke", -2);
+            MyMessage_Base *msg_to_send = new MyMessage_Base();
+            msg_to_send->setEvent(network_layer_ready);
+            msg_to_send->setMessage_ID(0);
             scheduleAt(start_time, msg_to_send);
-
         }
     }
-    else if (received_msg->getMessage_ID() == -2) // First time to send -- invoked from scheduleAt
+    else
     {
-        last_msg_id += 1;
-        sendNextMessage(last_msg_id);
-    }
-    else //Message from the pair
-    {
-
-        if (timeoutEvent == msg) //timeoutEvent
-        {
-            cancelEvent(timeoutEvent);
-            last_msg_id += 1;
-            sendNextMessage(last_msg_id);
-        }
-        else if (received_msg->getPiggybacking() == 0) // 0 for data only. (i.e Receiver)
-        {
-            receiveMessage(received_msg);
-        }
-        else if  (received_msg->getPiggybacking() == -2)    // Drop msg
-        {
-        }
-        else // 1 or -1 ack   -- phase 1 only         (i.e Sender)
-        {
-            cancelEvent(timeoutEvent);
-            last_msg_id += 1;
-            sendNextMessage(last_msg_id);
-        }
-        ///////////////////////
-        //Phase 2
-        ///////////////////////
-        /*
-        else if (received_msg->getPiggybacking() == 1) // 1 for ack
-        {
-        }
-        else if (received_msg->getPiggybacking() == 1) // -1 for nack
-        {
-        }
-        */
+        receiveMessageFromPeer(received_msg);
     }
 }
+
+void Node::receiveMessageFromPeer(MyMessage_Base *mmsg)
+{
+    switch (mmsg->getEvent())
+    {
+    case frame_arrival:
+        from_physical_layer(mmsg);
+        if (received_frame->getPiggybacking() == 0) // data only
+        {
+            if (received_frame->getMessage_ID() != frame_expected && no_nak)
+            {
+                // We did NOT receive the lower end of receive window => Send NAK immediately
+                send_frame(-1, 0, frame_expected); // type Nak
+            }
+            else
+            {
+                start_ack_timer();
+            }
+            if (between(frame_expected, received_frame->getMessage_ID(), too_far) && arrived[received_frame->getMessage_ID() % nr_bufs] == false)
+            {
+                arrived[received_frame->getMessage_ID() % nr_bufs] = true;
+                in_buf[received_frame->getMessage_ID() % nr_bufs] = mmsg;
+                while (arrived[frame_expected % nr_bufs])
+                {
+                    // to netwok layer
+                    no_nak = true;
+                    arrived[frame_expected % nr_bufs] = false;
+                    frame_expected++;
+                    too_far++;
+                    start_ack_timer();
+                }
+            }
+        }
+
+        if (received_frame->getPiggybacking() == -1)
+        {
+            int resend_seq_num = (received_frame->getPiggybacking_ID() + 1) % (max_seq_number + 1);
+            if (between(ack_expected, resend_seq_num, next_frame_to_send))
+            {
+                send_frame(0, resend_seq_num, frame_expected); //resend frame
+            }
+        }
+
+        while (between(ack_expected, received_frame->getPiggybacking_ID(), next_frame_to_send))
+        {
+            nbuffered--;
+            stop_timer(ack_expected % nr_bufs);
+            ack_expected++;
+        }
+        break;
+    case cksum_err:
+        if (no_nak)
+        {
+            send_frame(-1, 0, frame_expected);
+        }
+        break;
+    case timeout:
+        send_frame(0, oldest_frame, frame_expected);
+        break;
+    case network_layer_ready:
+        if (nbuffered < nr_bufs)
+        {
+            nbuffered++;
+            if(from_network_layer(&out_buf[next_frame_to_send % nr_bufs]))
+            {
+                send_frame(0, next_frame_to_send, frame_expected); // type data
+                next_frame_to_send++;
+            }
+        }
+        break;
+    case ack_timeout:
+        send_frame(1, 0, frame_expected);
+        break;
+    default:
+        std::cout << "Sad" << endl;
+    }
+    if (nbuffered < nr_bufs)
+    {
+        MyMessage_Base *msg_to_send = new MyMessage_Base();
+        msg_to_send->setEvent(network_layer_ready);
+        scheduleAt(simTime() + par("interval_between_msgs").doubleValue(), msg_to_send);
+    }
+    else
+    {
+    }
+}
+bool Node::from_network_layer(std::pair<std::string, std::string> *msg)
+{
+    if(messages.empty())
+    {
+        return false;
+    }
+    msg->first = (messages.front()).first;
+    msg->second = (messages.front()).second;
+    messages.pop();
+    return true;
+}
+void Node::send_frame(int frame_kind, int frame_num, int frame_exp)
+{
+    std::string payload;
+    if (frame_kind == 0) //if data, then set the payload string
+    {
+        payload = frameMessage(out_buf[frame_num % nr_bufs].second);
+    }
+    MyMessage_Base *msg_to_send = new MyMessage_Base(payload.c_str());
+
+    msg_to_send->setPiggybacking(frame_kind); /*frame_kind\piggybacking == data, ack, or nak*/
+
+    if (frame_kind == 0) //if data, then set the payload string
+    {
+        msg_to_send->setMessage_Payload(payload.c_str());
+    }
+
+    msg_to_send->setMessage_ID(frame_num);
+
+    msg_to_send->setPiggybacking_ID((frame_exp + max_seq_number) % (max_seq_number + 1)); /*msg_to_send.//  ggybacking_ID contains the sequence number of the last received frame in the contiguous sequence of frames*/
+    /*msg_to_send.Piggybacking_ID === circular(frame_expected-1, MAX_SEQ) */
+
+    if (frame_kind == -1) //nack
+    {
+        /*This way if the next packet is NOT frame_expected, we will start the ACK timer instead of sending a NAK   e //more time */
+        no_nak = false;
+    }
+
+    msg_to_send->setEvent(frame_arrival);
+
+    to_physical_layer(msg_to_send); // transmit the frame
+
+    if (frame_kind == 0) //data
+    {
+        //start_timer(frame_num % nr_bufs);
+    }
+    stop_ack_timer(); // No need to send separate ack, i.e already sent
+}
+void Node::printValues()
+{
+    EV << "ack_expected: " << ack_expected << "\t frame_expected: " << frame_expected << "\t next_frame_to_send: " << next_frame_to_send << "\t too_far: " << too_far << endl;
+}
+void Node::to_physical_layer(MyMessage_Base *msg_to_send)
+{
+    sendDelayed(msg_to_send, par("prop_delay"), "out_pair");
+}
+void Node::start_timer(int frame_num)
+{
+    MyMessage_Base *currentTimeout = timeoutEvent->dup();
+
+    //currentTimeout->setAck(message->getAck());
+    //currentTimeout->setSeq_Num(frame_num+dynamic_window_start);
+
+    scheduleAt(simTime() + par("timeout").doubleValue(), currentTimeout);
+
+    //timeoutBuffer[frame_num+dynamic_window_start] = currentTimeout;
+}
+void Node::stop_timer(int frame_num)
+{
+}
+void Node::start_ack_timer()
+{
+    stop_ack_timer();
+    ack_timer = new MyMessage_Base();
+    ack_timer->setEvent(ack_timeout);
+    scheduleAt(simTime() + par("timeout_ack").doubleValue(), ack_timer);
+}
+void Node::stop_ack_timer()
+{
+    if (ack_timer != nullptr)
+    {
+        cancelAndDelete(ack_timer);
+    }
+    ack_timer = nullptr;
+}
+void Node::from_physical_layer(MyMessage_Base *msg_received)
+{
+    received_frame = msg_received->dup();
+}
+void Node::inc(int &seq, int operation)
+{
+    switch (operation) // 0:next_frame_to_send , 1:ack_expected , 2:frame_expected
+    {
+    case 0:
+        if (seq < max_seq_number)
+            seq = (seq + 1);
+        break;
+    case 1:
+        seq = (seq + 1); //% (buffer.size());
+        break;
+    case 2:
+        seq = (seq + 1); // % (buffer.size());
+        break;
+    }
+}
+
+bool Node::between(int sf, int si, int sn)
+{
+    return (((sf <= si) && (si < sn)) || ((sn < sf) && (sf <= si)) || ((si < sn) && (sn < sf)));
+}
+
 void Node::sendNextMessage(int msg_id)
 {
     if (messages.empty())
     {
         double total_time = simTime().dbl() - start_transmission_time;
-        string str_1 = "node"+ std::to_string(index) + " end of input file\n";
-        string str_2 = "Total transmission time = "+ std::to_string(simTime().dbl() - start_transmission_time) + "\n";
-        string str_3 = "Total number of transmissions = "+ std::to_string(transmissions_number) + "\n";
-        string str_4 = "The network throughput = "+ std::to_string(expected_total_transmissions/total_time) + "\n";
+        string str_1 = "node" + std::to_string(index) + " end of input file\n";
+        string str_2 = "Total transmission time = " + std::to_string(simTime().dbl() - start_transmission_time) + "\n";
+        string str_3 = "Total number of transmissions = " + std::to_string(transmissions_number) + "\n";
+        string str_4 = "The network throughput = " + std::to_string(expected_total_transmissions / total_time) + "\n";
 
-        EV <<"..............................................."<<endl;
+        EV << "..............................................." << endl;
         EV << str_1;
         EV << str_2;
         EV << str_3;
-        EV << str_4 << endl<< endl;
+        EV << str_4 << endl
+           << endl;
         //-------------------------------------------------
-        std::cout<<"..............................................."<<endl;
+        std::cout << "..............................................." << endl;
         std::cout << str_1;
         std::cout << str_2;
         std::cout << str_3;
-        std::cout << str_4 << endl<< endl;
+        std::cout << str_4 << endl
+                  << endl;
         //--------------------------------------------------
         out_file.open(file_name, std::ios_base::app);
-        out_file<< "...............................................\n";
-        out_file<< str_1.c_str();
-        out_file<< str_2.c_str();
-        out_file<< str_3.c_str();
-        out_file<< str_4.c_str();
+        out_file << "...............................................\n";
+        out_file << str_1.c_str();
+        out_file << str_2.c_str();
+        out_file << str_3.c_str();
+        out_file << str_4.c_str();
         out_file.close();
 
         endSimulation();
@@ -306,13 +485,13 @@ vector<string> Node::stringSplit(const string &str)
 void Node::initializeFile()
 {
     file_name = "../output_examples/";
-    if(index%2==0)
+    if (index % 2 == 0)
     {
-        file_name += "pair"+std::to_string(index)+std::to_string(index+1)+".txt";
+        file_name += "pair" + std::to_string(index) + std::to_string(index + 1) + ".txt";
     }
     else
     {
-        file_name += "pair"+std::to_string(index-1)+std::to_string(index)+".txt";
+        file_name += "pair" + std::to_string(index - 1) + std::to_string(index) + ".txt";
     }
     out_file.open(file_name);
     out_file.close();

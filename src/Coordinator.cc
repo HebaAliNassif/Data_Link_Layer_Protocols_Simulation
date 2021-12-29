@@ -45,9 +45,7 @@ void Coordinator::initialize()
         MyMessage_Base *mmsg = new MyMessage_Base((char*)"Initialization");
         mmsg->setMessage_Payload(line.c_str());
 
-        if (node_index >= 2) //Phase one only (2 nodes only not 6)
-            break;
-
+        if(node_index>=2)return;
         mmsg->setMessage_ID(-1);        // -1 for indicates initialization
 
         // Sending the information to the intended node.

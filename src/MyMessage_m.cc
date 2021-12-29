@@ -183,6 +183,7 @@ MyMessage_Base::MyMessage_Base(const char *name, short kind) : ::omnetpp::cPacke
     this->Sending_Time = 0;
     this->Piggybacking = 0;
     this->Piggybacking_ID = 0;
+    this->event = 0;
 }
 
 MyMessage_Base::MyMessage_Base(const MyMessage_Base& other) : ::omnetpp::cPacket(other)
@@ -210,6 +211,7 @@ void MyMessage_Base::copy(const MyMessage_Base& other)
     this->Piggybacking = other.Piggybacking;
     this->Piggybacking_ID = other.Piggybacking_ID;
     this->Message_Payload = other.Message_Payload;
+    this->event = other.event;
 }
 
 void MyMessage_Base::parsimPack(omnetpp::cCommBuffer *b) const
@@ -221,6 +223,7 @@ void MyMessage_Base::parsimPack(omnetpp::cCommBuffer *b) const
     doParsimPacking(b,this->Piggybacking);
     doParsimPacking(b,this->Piggybacking_ID);
     doParsimPacking(b,this->Message_Payload);
+    doParsimPacking(b,this->event);
 }
 
 void MyMessage_Base::parsimUnpack(omnetpp::cCommBuffer *b)
@@ -232,6 +235,7 @@ void MyMessage_Base::parsimUnpack(omnetpp::cCommBuffer *b)
     doParsimUnpacking(b,this->Piggybacking);
     doParsimUnpacking(b,this->Piggybacking_ID);
     doParsimUnpacking(b,this->Message_Payload);
+    doParsimUnpacking(b,this->event);
 }
 
 int MyMessage_Base::getMessage_ID() const
@@ -292,6 +296,16 @@ const char * MyMessage_Base::getMessage_Payload() const
 void MyMessage_Base::setMessage_Payload(const char * Message_Payload)
 {
     this->Message_Payload = Message_Payload;
+}
+
+int MyMessage_Base::getEvent() const
+{
+    return this->event;
+}
+
+void MyMessage_Base::setEvent(int event)
+{
+    this->event = event;
 }
 
 class MyMessageDescriptor : public omnetpp::cClassDescriptor
@@ -360,7 +374,7 @@ const char *MyMessageDescriptor::getProperty(const char *propertyname) const
 int MyMessageDescriptor::getFieldCount() const
 {
     omnetpp::cClassDescriptor *basedesc = getBaseClassDescriptor();
-    return basedesc ? 6+basedesc->getFieldCount() : 6;
+    return basedesc ? 7+basedesc->getFieldCount() : 7;
 }
 
 unsigned int MyMessageDescriptor::getFieldTypeFlags(int field) const
@@ -378,8 +392,9 @@ unsigned int MyMessageDescriptor::getFieldTypeFlags(int field) const
         FD_ISEDITABLE,
         FD_ISEDITABLE,
         FD_ISEDITABLE,
+        FD_ISEDITABLE,
     };
-    return (field>=0 && field<6) ? fieldTypeFlags[field] : 0;
+    return (field>=0 && field<7) ? fieldTypeFlags[field] : 0;
 }
 
 const char *MyMessageDescriptor::getFieldName(int field) const
@@ -397,8 +412,9 @@ const char *MyMessageDescriptor::getFieldName(int field) const
         "Piggybacking",
         "Piggybacking_ID",
         "Message_Payload",
+        "event",
     };
-    return (field>=0 && field<6) ? fieldNames[field] : nullptr;
+    return (field>=0 && field<7) ? fieldNames[field] : nullptr;
 }
 
 int MyMessageDescriptor::findField(const char *fieldName) const
@@ -411,6 +427,7 @@ int MyMessageDescriptor::findField(const char *fieldName) const
     if (fieldName[0]=='P' && strcmp(fieldName, "Piggybacking")==0) return base+3;
     if (fieldName[0]=='P' && strcmp(fieldName, "Piggybacking_ID")==0) return base+4;
     if (fieldName[0]=='M' && strcmp(fieldName, "Message_Payload")==0) return base+5;
+    if (fieldName[0]=='e' && strcmp(fieldName, "event")==0) return base+6;
     return basedesc ? basedesc->findField(fieldName) : -1;
 }
 
@@ -429,8 +446,9 @@ const char *MyMessageDescriptor::getFieldTypeString(int field) const
         "int",
         "int",
         "string",
+        "int",
     };
-    return (field>=0 && field<6) ? fieldTypeStrings[field] : nullptr;
+    return (field>=0 && field<7) ? fieldTypeStrings[field] : nullptr;
 }
 
 const char **MyMessageDescriptor::getFieldPropertyNames(int field) const
@@ -503,6 +521,7 @@ std::string MyMessageDescriptor::getFieldValueAsString(void *object, int field, 
         case 3: return long2string(pp->getPiggybacking());
         case 4: return long2string(pp->getPiggybacking_ID());
         case 5: return oppstring2string(pp->getMessage_Payload());
+        case 6: return long2string(pp->getEvent());
         default: return "";
     }
 }
@@ -522,6 +541,7 @@ bool MyMessageDescriptor::setFieldValueAsString(void *object, int field, int i, 
         case 3: pp->setPiggybacking(string2long(value)); return true;
         case 4: pp->setPiggybacking_ID(string2long(value)); return true;
         case 5: pp->setMessage_Payload((value)); return true;
+        case 6: pp->setEvent(string2long(value)); return true;
         default: return false;
     }
 }
