@@ -91,7 +91,7 @@ protected:
 
   bool from_network_layer(std::pair<std::string, std::string> *);
   void send_frame(int frame_kind, int frame_num, int frame_exp);
-  void to_physical_layer(MyMessage_Base *msg_to_send);
+  void to_physical_layer(MyMessage_Base *msg_to_send, std::string error_bits);
   void start_ack_timer();
   void stop_ack_timer();
   void start_timer(int frame_num);

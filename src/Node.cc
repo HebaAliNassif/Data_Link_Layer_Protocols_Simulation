@@ -46,7 +46,10 @@ void Node::initialize()
         arrived.push_back(false);
         out_buf.push_back(std::pair<std::string, std::string>());
         in_buf.push_back(new MyMessage_Base());
+        timeoutBuffer.push_back(nullptr);
     }
+    timeoutEvent = new MyMessage_Base("timeout");
+    timeoutEvent->setEvent(timeout);
     ack_timer = nullptr;
 }
 
@@ -85,6 +88,8 @@ void Node::receiveMessageFromPeer(MyMessage_Base *mmsg)
     switch (mmsg->getEvent())
     {
     case frame_arrival:
+        EV<<"Receiver: \nEvent: "<<mmsg->getEvent()<<"\t Message ID: "<<mmsg->getMessage_ID()<<"\t Payload: "<<mmsg->getMessage_Payload()<<"\t Piggybacking: "<<mmsg->getPiggybacking()<<"\t Piggybacking ID: "<<mmsg->getPiggybacking_ID()<<"\tTrailer: "<<mmsg->getTrailer()<<endl;
+
         from_physical_layer(mmsg);
         if (received_frame->getPiggybacking() == 0) // data only
         {
@@ -118,6 +123,7 @@ void Node::receiveMessageFromPeer(MyMessage_Base *mmsg)
             int resend_seq_num = (received_frame->getPiggybacking_ID() + 1) % (max_seq_number + 1);
             if (between(ack_expected, resend_seq_num, next_frame_to_send))
             {
+                EV<<"Inside resend Msg. \tresend_seq_num: "<<resend_seq_num<<endl;
                 send_frame(0, resend_seq_num, frame_expected); //resend frame
             }
         }
@@ -136,16 +142,20 @@ void Node::receiveMessageFromPeer(MyMessage_Base *mmsg)
         }
         break;
     case timeout:
-        send_frame(0, oldest_frame, frame_expected);
+        send_frame(0, mmsg->getMessage_ID(), frame_expected);
         break;
     case network_layer_ready:
         if (nbuffered < nr_bufs)
         {
             nbuffered++;
-            if(from_network_layer(&out_buf[next_frame_to_send % nr_bufs]))
+            if (from_network_layer(&out_buf[next_frame_to_send % nr_bufs]))
             {
                 send_frame(0, next_frame_to_send, frame_expected); // type data
                 next_frame_to_send++;
+            }
+            else
+            {
+                EV<<"HEEEEEEEEEEEEEERE"<<endl;
             }
         }
         break;
@@ -155,7 +165,7 @@ void Node::receiveMessageFromPeer(MyMessage_Base *mmsg)
     default:
         std::cout << "Sad" << endl;
     }
-    if (nbuffered < nr_bufs)
+    if (nbuffered < nr_bufs && messages.empty()==false)
     {
         MyMessage_Base *msg_to_send = new MyMessage_Base();
         msg_to_send->setEvent(network_layer_ready);
@@ -167,7 +177,7 @@ void Node::receiveMessageFromPeer(MyMessage_Base *mmsg)
 }
 bool Node::from_network_layer(std::pair<std::string, std::string> *msg)
 {
-    if(messages.empty())
+    if (messages.empty())
     {
         return false;
     }
@@ -179,9 +189,16 @@ bool Node::from_network_layer(std::pair<std::string, std::string> *msg)
 void Node::send_frame(int frame_kind, int frame_num, int frame_exp)
 {
     std::string payload;
+    std::bitset<8> CRC_byte;
     if (frame_kind == 0) //if data, then set the payload string
     {
         payload = frameMessage(out_buf[frame_num % nr_bufs].second);
+        CRC_byte = calculateCRC(payload);
+
+        if (out_buf[frame_num % nr_bufs].first[0] == '1')
+        {
+            payload = introduceErrorToPayload(payload);
+        }
     }
     MyMessage_Base *msg_to_send = new MyMessage_Base(payload.c_str());
 
@@ -190,6 +207,7 @@ void Node::send_frame(int frame_kind, int frame_num, int frame_exp)
     if (frame_kind == 0) //if data, then set the payload string
     {
         msg_to_send->setMessage_Payload(payload.c_str());
+        msg_to_send->setTrailer(CRC_byte);
     }
 
     msg_to_send->setMessage_ID(frame_num);
@@ -205,35 +223,62 @@ void Node::send_frame(int frame_kind, int frame_num, int frame_exp)
 
     msg_to_send->setEvent(frame_arrival);
 
-    to_physical_layer(msg_to_send); // transmit the frame
+    to_physical_layer(msg_to_send, out_buf[frame_num % nr_bufs].first); // transmit the frame
 
     if (frame_kind == 0) //data
     {
-        //start_timer(frame_num % nr_bufs);
+        out_buf[frame_num % nr_bufs].first = "0000";
+        start_timer(frame_num % nr_bufs);
     }
     stop_ack_timer(); // No need to send separate ack, i.e already sent
+    EV<<"Sender: \nEvent: "<<msg_to_send->getEvent()<<"\t Message ID: "<<msg_to_send->getMessage_ID()<<"\t Payload: "<<msg_to_send->getMessage_Payload()<<"\t Piggybacking: "<<msg_to_send->getPiggybacking()<<"\t Piggybacking ID: "<<msg_to_send->getPiggybacking_ID()<<"\t Trailer: "<<msg_to_send->getTrailer()<<endl;
 }
 void Node::printValues()
 {
     EV << "ack_expected: " << ack_expected << "\t frame_expected: " << frame_expected << "\t next_frame_to_send: " << next_frame_to_send << "\t too_far: " << too_far << endl;
 }
-void Node::to_physical_layer(MyMessage_Base *msg_to_send)
+void Node::to_physical_layer(MyMessage_Base *msg_to_send, std::string error_bits)
 {
-    sendDelayed(msg_to_send, par("prop_delay"), "out_pair");
+    double time_delay_of_msg = par("prop_delay").doubleValue();
+
+    if (error_bits[2] == '1') // Duplicated
+    {
+        double time_difference = 0.01;
+        sendDelayed(msg_to_send->dup(), time_delay_of_msg + time_difference, "out_pair");
+        transmissions_number++;
+    }
+
+    if (error_bits[3] == '1') // Delay
+    {
+        time_delay_of_msg += par("delay_amount").doubleValue();
+    }
+
+    if (error_bits[1] == '1') // Loss. Do not send
+    {
+    }
+    else // Send
+    {
+        sendDelayed(msg_to_send, par("prop_delay"), "out_pair");
+    }
 }
 void Node::start_timer(int frame_num)
 {
-    MyMessage_Base *currentTimeout = timeoutEvent->dup();
+    EV<<"start_timer: "<<frame_num<<endl;
+    std::cout<<"start_timer: "<<frame_num<<endl;
+    MyMessage_Base *currentTimeout = new MyMessage_Base("timeout");
 
-    //currentTimeout->setAck(message->getAck());
-    //currentTimeout->setSeq_Num(frame_num+dynamic_window_start);
+    currentTimeout->setEvent(timeout);
+    currentTimeout->setMessage_ID(frame_num);
 
     scheduleAt(simTime() + par("timeout").doubleValue(), currentTimeout);
 
-    //timeoutBuffer[frame_num+dynamic_window_start] = currentTimeout;
+    timeoutBuffer[frame_num] = currentTimeout;
 }
 void Node::stop_timer(int frame_num)
 {
+    EV<<"stop_timer: "<<frame_num<<endl;
+    std::cout<<"stop_timer: "<<frame_num<<endl;
+    cancelAndDelete(timeoutBuffer[frame_num]);
 }
 void Node::start_ack_timer()
 {
