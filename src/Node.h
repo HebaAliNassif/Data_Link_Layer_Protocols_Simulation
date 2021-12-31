@@ -42,6 +42,10 @@ enum print_mode
   timeout_,
   drop_
 };
+
+/* Macro inc is expanded in-line: Increment k circularly. */
+//#define inc(k) if (k < MAX_SEQ) k = k + 1; else k = 0
+
 class Node : public cSimpleModule
 {
   
@@ -72,16 +76,14 @@ class Node : public cSimpleModule
   std::vector<MyMessage_Base *> in_buf;                     // Buffers for the inbound stream
   std::vector<bool> arrived;                                // Inbound bit map
 
-  int i;                                                    // Index ito buffer bool
-
   MyMessage_Base * received_frame;
   std::vector<MyMessage_Base *> timeoutBuffer;
   MyMessage_Base *timeoutEvent;
   MyMessage_Base *ack_timer;
 
   bool peer_finished = false;
-  //Phase 1
-  int last_msg_id = -1;
+
+  int error_position = -1;
 
 protected:
   virtual void initialize();
@@ -103,12 +105,16 @@ protected:
   void startDataTimer(int frame_num);
   void stopDataTimer(int frame_num);
 
+  void checkEndOfTransmission();
   void finishMsg();
+
+  void enableNetworkLayer();
+  void disableNetworkLayer();
   
   // Helper Methods
-  void inc(int&seq, int op);
   vector<string> stringSplit(const string &str);
-  std::string stringInBits(std::string str);
+  std::string stringToBits(std::string str);
+  std::string bitsToString(std::string str);
   std::string frameMessage(std::string str);
   bool between(int sf, int si, int sn); // Check if sf <= si < sn
 
@@ -130,15 +136,10 @@ protected:
   void printNode(MyMessage_Base *msg, int print_mode, bool error);
 
   // Hamming code Methods
-  //std::string getHammingCode(std::string msgBits);
-  void findHammingCode(vector<int> &msgBit);
-  vector<int> generateHammingCode(vector<int> msgBits, int m, int r);
-  string hamming(string payload);
+  string generateHammingCode(string payload);
+  string correctMsgUsingHammingCode(string payload);
+  string removeHammingBits(string payload);
 
-  // Phase 1
-  void sendNextMessage(int msg_id);
-  void receiveMessage(MyMessage_Base *msg);
-  MyMessage_Base *prepareMessageToSend(string payload, int message_id, double sending_time = 0, bits trailer = 0, int piggybacking_id = 0, int piggybacking = 0);
 };
 
 #endif

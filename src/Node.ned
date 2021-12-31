@@ -26,6 +26,7 @@ simple Node
     int window_size;
     double timeout_ack;
     double interval_between_msgs;
+    volatile int index_of_error_bit = intuniform(0, 100000);
     bool hamming;
      gates:
         input in_pair;

@@ -51,9 +51,7 @@ void Node::initialize()
     timeoutEvent = new MyMessage_Base("timeout");
     timeoutEvent->setEvent(timeout);
     ack_timer = nullptr;
-    //vector<int> msgBit = {1, 0, 1, 1, 0, 0, 1};
-    //findHammingCode(msgBit);
-    //std::cout<<endl<<"Hamming: "<<hamming("1011001")<<endl;
+    std::cout << bitsToString(stringToBits("Hi")) << endl;
 }
 
 void Node::handleMessage(cMessage *msg)
@@ -92,15 +90,15 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
     //printNodeVariables();
     switch (mmsg->getEvent())
     {
-    case frame_arrival:
+    case frame_arrival: // A data or control frame has arrived
         printNode(mmsg, receiver_, false);
         fromPhysicalLayer(mmsg);
-        if (received_frame->getPiggybacking() == 0) // data
+        if (received_frame->getPiggybacking() == 0) // Data
         {
             if (received_frame->getMessage_ID() != frame_expected && no_nak)
             {
                 // We did NOT receive the lower end of receive window => Send NAK immediately
-                sendFrame(-1, 0, frame_expected); // type Nak
+                sendFrame(-1, 0, frame_expected); // Type Nak
             }
             else // Restart ACK timer every time we receive out of order frame (to be able to send cumulative ack)
             {
@@ -121,27 +119,28 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
                     startAckTimer();  // To see if a separate ack is needed
                 }
             }
-            else if (arrived[received_frame->getMessage_ID() % nr_bufs] == true)
+            else if (arrived[received_frame->getMessage_ID() % nr_bufs] == true) // Check duplicate msg
             {
+                // Drop the msg
                 printNode(received_frame, drop_, false);
             }
         }
 
-        if (received_frame->getPiggybacking() == -1)
+        if (received_frame->getPiggybacking() == -1) // Nak
         {
             int resend_seq_num = (received_frame->getPiggybacking_ID() + 1) % (max_seq_number + 1);
-            if (between(ack_expected, resend_seq_num, next_frame_to_send))
+            if (between(ack_expected % (max_seq_number + 1), resend_seq_num, next_frame_to_send % (max_seq_number + 1)))
             {
-                EV << "Inside resend Msg. \tresend_seq_num: " << resend_seq_num << endl;
                 sendFrame(0, resend_seq_num, frame_expected); //resend frame
             }
         }
 
+        // Checking for ack receiving (ACK means all frames in the contiguous sequence of frames before and including ACKed frame have been received)
         while (between(ack_expected % (max_seq_number + 1), received_frame->getPiggybacking_ID(), next_frame_to_send % (max_seq_number + 1)))
         {
-            nbuffered--;
-            stopDataTimer(ack_expected);
-            ack_expected++;
+            nbuffered--;                 // Free buffer (out buffer)
+            stopDataTimer(ack_expected); // Stop retransmit timer
+            ack_expected++;              // Advance lower edge of sender's window
         }
         break;
     case cksum_err:
@@ -154,49 +153,37 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
         printNode(mmsg, timeout_, false);
         sendFrame(0, mmsg->getMessage_ID(), frame_expected);
         break;
-    case network_layer_ready:
-        if (nbuffered < nr_bufs)
+    case network_layer_ready: // Accept, save, and transmit a new frame
+        if (nbuffered < nr_bufs && fromNetworkLayer(&out_buf[next_frame_to_send % nr_bufs]))
         {
-            if (fromNetworkLayer(&out_buf[next_frame_to_send % nr_bufs]))
-            {
-                nbuffered++;
-                sendFrame(0, next_frame_to_send, frame_expected); // type data
-                next_frame_to_send++;
-            }
+            nbuffered++;
+            sendFrame(0, next_frame_to_send, frame_expected); // Type data
+            next_frame_to_send++;
         }
         break;
-    case ack_timeout:
+    case ack_timeout: // Ack timer expired => send ack
         sendFrame(1, 0, frame_expected);
         break;
-    case data_finished:
+    case data_finished: // Peer finished transmission
         peer_finished = true;
         break;
     default:
         std::cout << "Sad" << endl;
     }
+
     if (nbuffered < nr_bufs && messages.empty() == false)
     {
-        MyMessage_Base *msg_to_send = new MyMessage_Base();
-        msg_to_send->setEvent(network_layer_ready);
-        scheduleAt(simTime() + par("interval_between_msgs").doubleValue(), msg_to_send);
+        enableNetworkLayer();
     }
     else
     {
+        disableNetworkLayer();
     }
 
     //EV << "On Leave: " << endl;
     //printNodeVariables();
 
-    if (ack_expected == expected_total_transmissions && peer_finished == false)
-    {
-        EV << "Here" << endl;
-        finishMsg();
-    }
-    else if (ack_expected == expected_total_transmissions && peer_finished == true)
-    {
-        printStatistics();
-        endSimulation();
-    }
+    checkEndOfTransmission();
 }
 
 void Node::sendFrame(int frame_kind, int frame_num, int frame_exp)
@@ -206,17 +193,20 @@ void Node::sendFrame(int frame_kind, int frame_num, int frame_exp)
     if (frame_kind == 0) //if data, then set the payload string
     {
         payload = frameMessage(out_buf[frame_num % nr_bufs].second);
-
-        //payload = getHammingCode(stringInBits(payload));
-
-        CRC_byte = calculateCRC(payload);
-
+        if (par("hamming").boolValue() == true)
+        {
+            payload = generateHammingCode(stringToBits(payload));
+        }
+        else
+        {
+            CRC_byte = calculateCRC(payload);
+        }
         if (out_buf[frame_num % nr_bufs].first[0] == '1')
         {
             payload = introduceErrorToPayload(payload);
         }
     }
-    MyMessage_Base *msg_to_send = new MyMessage_Base(payload.c_str());
+    MyMessage_Base *msg_to_send = new MyMessage_Base(to_string(frame_num).c_str());
 
     msg_to_send->setPiggybacking(frame_kind); /*frame_kind\piggybacking == data, ack, or nak*/
 
@@ -239,10 +229,11 @@ void Node::sendFrame(int frame_kind, int frame_num, int frame_exp)
 
     msg_to_send->setEvent(frame_arrival);
 
-    toPhysicalLayer(msg_to_send, out_buf[frame_num % nr_bufs].first); // transmit the frame
-
     if (frame_kind == 0) //data
     {
+        transmissions_number++;
+        toPhysicalLayer(msg_to_send, out_buf[frame_num % nr_bufs].first); // transmit the frame
+
         if (out_buf[frame_num % nr_bufs].first[0] == '1')
             printNode(msg_to_send, sender_, true);
         else
@@ -252,10 +243,13 @@ void Node::sendFrame(int frame_kind, int frame_num, int frame_exp)
     }
     else
     {
+        toPhysicalLayer(msg_to_send, "0000"); // transmit the frame
+
         printNode(msg_to_send, sender_, false);
     }
     stopAckTimer(); // No need to send separate ack, i.e already sent
-    EV << "Sender: \nEvent: " << msg_to_send->getEvent() << "\t Message ID: " << msg_to_send->getMessage_ID() << "\t Payload: " << msg_to_send->getMessage_Payload() << "\t Piggybacking: " << msg_to_send->getPiggybacking() << "\t Piggybacking ID: " << msg_to_send->getPiggybacking_ID() << "\t Trailer: " << msg_to_send->getTrailer() << endl;
+
+    //EV << "Sender: \nEvent: " << msg_to_send->getEvent() << "\t Message ID: " << msg_to_send->getMessage_ID() << "\t Payload: " << msg_to_send->getMessage_Payload() << "\t Piggybacking: " << msg_to_send->getPiggybacking() << "\t Piggybacking ID: " << msg_to_send->getPiggybacking_ID() << "\t Trailer: " << msg_to_send->getTrailer() << endl;
 }
 
 bool Node::fromNetworkLayer(std::pair<std::string, std::string> *msg)
@@ -307,9 +301,9 @@ void Node::toPhysicalLayer(MyMessage_Base *msg_to_send, std::string error_bits)
 
 void Node::startAckTimer()
 {
-    EV << "Restart ack timer" << endl;
+    //EV << "Restart ack timer" << endl;
     stopAckTimer();
-    EV << "Start ack timer" << endl;
+    //EV << "Start ack timer" << endl;
     ack_timer = new MyMessage_Base();
     ack_timer->setEvent(ack_timeout);
     scheduleAt(simTime() + par("timeout_ack").doubleValue(), ack_timer);
@@ -319,7 +313,7 @@ void Node::stopAckTimer()
 {
     if (ack_timer != nullptr)
     {
-        EV << "Stop current ack timer" << endl;
+        //EV << "Stop current ack timer" << endl;
         cancelAndDelete(ack_timer);
     }
     ack_timer = nullptr;
@@ -327,7 +321,7 @@ void Node::stopAckTimer()
 
 void Node::startDataTimer(int frame_num)
 {
-    EV << "Start data timer for msg with frame number = " << frame_num << endl;
+    //EV << "Start data timer for msg with frame number = " << frame_num << endl;
 
     MyMessage_Base *currentTimeout = new MyMessage_Base("timeout");
 
@@ -341,8 +335,22 @@ void Node::startDataTimer(int frame_num)
 
 void Node::stopDataTimer(int frame_num)
 {
-    EV << "Stop data timer for msg with frame number = " << frame_num << endl;
+    //EV << "Stop data timer for msg with frame number = " << frame_num << endl;
     cancelAndDelete(timeoutBuffer[frame_num % nr_bufs]);
+}
+
+void Node::checkEndOfTransmission()
+{
+    // Check if the node finished sending all the messages in the input file and received their acknowledgement
+    if (ack_expected == expected_total_transmissions && peer_finished == false) // If the peer didn't finished, then msg the send a finish msg to the peer
+    {
+        finishMsg();
+    }
+    else if (ack_expected == expected_total_transmissions && peer_finished == true) // If the peer finished, then end the simulation
+    {
+        printStatistics();
+        endSimulation();
+    }
 }
 
 void Node::finishMsg()
@@ -352,22 +360,15 @@ void Node::finishMsg()
     sendDelayed(msg_to_send, 0.01, "out_pair");
 }
 
-void Node::inc(int &seq, int op)
+void Node::enableNetworkLayer()
 {
-    switch (op) // 0:next_frame_to_send , 1:ack_expected , 2:frame_expected
-    {
-    case 0:
-        if (seq < par("MAX_SEQ").intValue())
-            seq = (seq + 1);
+    MyMessage_Base *msg_to_send = new MyMessage_Base();
+    msg_to_send->setEvent(network_layer_ready);
+    scheduleAt(simTime() + par("interval_between_msgs").doubleValue(), msg_to_send);
+}
 
-        break;
-    case 1:
-        seq = (seq + 1); //% (buffer.size());
-        break;
-    case 2:
-        seq = (seq + 1); // % (buffer.size());
-        break;
-    }
+void Node::disableNetworkLayer()
+{
 }
 
 vector<string> Node::stringSplit(const string &str)
@@ -379,7 +380,7 @@ vector<string> Node::stringSplit(const string &str)
     return result;
 }
 
-std::string Node::stringInBits(std::string str)
+std::string Node::stringToBits(std::string str)
 {
     int char_count = str.size() / sizeof(char);
     string data_in_bits = "";
@@ -390,6 +391,21 @@ std::string Node::stringInBits(std::string str)
     }
 
     return data_in_bits;
+}
+
+std::string Node::bitsToString(std::string str)
+{
+    std::stringstream sstream(str);
+    std::string output = "";
+    while (sstream.good())
+    {
+        std::bitset<8> bits;
+        sstream >> bits;
+        char c = char(bits.to_ulong());
+        output += c;
+    }
+    output = std::string(output.c_str());
+    return output;
 }
 
 std::string Node::frameMessage(std::string str)
@@ -452,20 +468,9 @@ void Node::initializeMessageArray(string file_name)
 std::string Node::introduceErrorToPayload(string payload)
 {
     int char_count = payload.size() / sizeof(char);
-    std::vector<std::bitset<8>> vec;
-    for (int i = 0; i < char_count; i++)
-    {
-        vec.push_back(payload[i]);
-    }
-    int index_of_char = intuniform(0, char_count - 1);
-    int index_of_bit = intuniform(0, 7);
-    vec[index_of_char][index_of_bit] = vec[index_of_char][index_of_bit] xor 1;
-    std::string final_string = "";
-    for (std::vector<std::bitset<8>>::iterator it = vec.begin(); it != vec.end(); ++it)
-    {
-        final_string += (char)(*it).to_ulong();
-    }
-    return final_string;
+    int index_of_bit = intuniform(0, char_count);
+    payload[index_of_bit] = int(payload[index_of_bit]) xor 1;
+    return payload;
 }
 
 std::bitset<8> Node::calculateCRC(std::string msg)
@@ -584,14 +589,14 @@ void Node::printStatistics()
 {
     double total_time = simTime().dbl() - start_transmission_time;
     string str_1;
-    if(index%2==0)
+    if (index % 2 == 0)
     {
         str_1 = "node" + std::to_string(index) + " end of input file\n";
-        str_1 += "node" + std::to_string(index+1) + " end of input file\n";
+        str_1 += "node" + std::to_string(index + 1) + " end of input file\n";
     }
     else
     {
-        str_1 = "node" + std::to_string(index-1) + " end of input file\n";
+        str_1 = "node" + std::to_string(index - 1) + " end of input file\n";
         str_1 += "node" + std::to_string(index) + " end of input file\n";
     }
     string str_2 = "Total transmission time = " + std::to_string(simTime().dbl() - start_transmission_time) + "\n";
@@ -626,6 +631,8 @@ void Node::printStatistics()
 void Node::printNode(MyMessage_Base *msg, int print_mode, bool error)
 {
     std::string string_to_print = "";
+    std::string content;
+    std::bitset<8> checkbits = msg->getTrailer();
     switch (print_mode)
     {
     case (receiver_):
@@ -634,13 +641,20 @@ void Node::printNode(MyMessage_Base *msg, int print_mode, bool error)
         string_to_print += " received message with id=";
         string_to_print += std::to_string(msg->getMessage_ID());
         string_to_print += " and content='";
-        string_to_print += msg->getMessage_Payload();
+        if (par("hamming").boolValue() == true)
+        {
+            content = bitsToString(removeHammingBits(std::string(msg->getMessage_Payload())));
+        }
+        else
+            content = (msg->getMessage_Payload());
+        string_to_print += content;
         string_to_print += "' at ";
         string_to_print += std::to_string(simTime().dbl());
-        if (error)
+        if (par("hamming").boolValue() == false && content != "" && calculateCRC(content + (char)checkbits.to_ulong()) != std::bitset<8>("00000000"))
         {
             string_to_print += " with modification";
         }
+
         if (msg->getPiggybacking() == -1)
         {
             string_to_print += ", and NACK number ";
@@ -651,6 +665,19 @@ void Node::printNode(MyMessage_Base *msg, int print_mode, bool error)
             string_to_print += ", and piggybacking Ack number ";
             string_to_print += std::to_string(msg->getPiggybacking_ID());
         }
+
+        if (par("hamming").boolValue() == true && content != "")
+        {
+            std::string correct_msg = bitsToString(correctMsgUsingHammingCode(std::string(msg->getMessage_Payload())));
+            if (std::strcmp(correct_msg.c_str(), content.c_str())!= 0)
+            {
+                string_to_print += "\n";
+                string_to_print += "Error was detected at bit number ";
+                string_to_print += to_string(error_position);
+                string_to_print += ". Corrected Msg: ";
+                string_to_print += correct_msg;
+            }
+        }
         break;
     case (sender_):
         string_to_print = "node";
@@ -658,7 +685,11 @@ void Node::printNode(MyMessage_Base *msg, int print_mode, bool error)
         string_to_print += " sends message with id=";
         string_to_print += std::to_string(msg->getMessage_ID());
         string_to_print += " and content='";
-        string_to_print += msg->getMessage_Payload();
+        if (par("hamming").boolValue() == true)
+            content = bitsToString(correctMsgUsingHammingCode(std::string(msg->getMessage_Payload())));
+        else
+            content = (msg->getMessage_Payload());
+        string_to_print += content;
         string_to_print += "' at ";
         string_to_print += std::to_string(simTime().dbl());
         if (error)
@@ -693,211 +724,25 @@ void Node::printNode(MyMessage_Base *msg, int print_mode, bool error)
     default:
         break;
     }
-    EV << string_to_print << endl
-       << endl;
+    //EV << string_to_print << endl << endl;
     //-------------------------------------------------
-    std::cout << string_to_print << endl
-              << endl;
+    std::cout << string_to_print << endl << endl;
     //--------------------------------------------------
     out_file.open(file_name, std::ios_base::app);
     out_file << string_to_print.c_str() << endl;
     out_file.close();
 }
 
-/*
-std::string Node::getHammingCode(std::string msgBits)
+string Node::generateHammingCode(string payload)
 {
-
-    // Message bit size
-    int m = msgBits.size();
-
-    // r is the number of redundant bits
-    int r = 0;
-
-    // Find no. of redundant bits
-    while (pow(2, r) < (m + r + 1))
-    {
-        r++;
-    }
-
-    // Stores the Hamming Code
-    int hammingCode[r + m];
-
-    // Find positions of redundant bits
-    for (int i = 0; i < r; ++i)
-    {
-        // Placing -1 at redundant bits place to identify it later
-        hammingCode[int(pow(2, i) - 1)] = -1;
-    }
-
-    int j = 0;
-
-    // Iterate to update the code
-    for (int i = 0; i < (r + m); i++)
-    {
-        // Placing msgBits where -1 is absent
-        if (hammingCode[i] != -1)
-        {
-            hammingCode[i] = msgBits[j];
-            j++;
-        }
-    }
-
-    for (int i = 0; i < (r + m); i++)
-    {
-        // If current bit is not redundant bit then continue
-        if (hammingCode[i] != -1)
-            continue;
-
-        int x = log2(i + 1);
-        int parity = 0;
-
-        // Find msg bits containing set bit at x'th position
-        for (int j = i + 2; j <= (r + m); ++j)
-        {
-            if (j & (1 << x))
-            {
-                if (hammingCode[j - 1] == 1)
-                {
-                    parity++;
-                }
-            }
-        }
-
-        // Generating hamming code for even parity
-        if (parity % 2 == 0)
-        {
-            hammingCode[i] = 0;
-        }
-        else
-        {
-            hammingCode[i] = 1;
-        }
-    }
-
-    std::stringstream temp;
-    for (int i = 1; i <= m + r; i++)
-    {
-        temp << hammingCode[i];
-    }
-    return temp.str();
-}
-*/
-vector<int> Node::generateHammingCode(vector<int> msgBits, int m, int r)
-{
-    // Stores the Hamming Code
-    vector<int> hammingCode(r + m);
-
-    // Find positions of redundant bits
-    for (int i = 0; i < r; ++i)
-    {
-
-        // Placing -1 at redundant bits
-        // place to identify it later
-        hammingCode[pow(2, i) - 1] = -1;
-    }
-
-    int j = 0;
-
-    // Iterate to update the code
-    for (int i = 0; i < (r + m); i++)
-    {
-
-        // Placing msgBits where -1 is
-        // absent i.e., except redundant
-        // bits all positions are msgBits
-        if (hammingCode[i] != -1)
-        {
-            hammingCode[i] = msgBits[j];
-            j++;
-        }
-    }
-
-    for (int i = 0; i < (r + m); i++)
-    {
-
-        // If current bit is not redundant
-        // bit then continue
-        if (hammingCode[i] != -1)
-            continue;
-
-        int x = log2(i + 1);
-        int one_count = 0;
-
-        // Find msg bits containing
-        // set bit at x'th position
-        for (int j = i + 2;
-             j <= (r + m); ++j)
-        {
-
-            if (j & (1 << x))
-            {
-                if (hammingCode[j - 1] == 1)
-                {
-                    one_count++;
-                }
-            }
-        }
-
-        // Generating hamming code for
-        // even parity
-        if (one_count % 2 == 0)
-        {
-            hammingCode[i] = 0;
-        }
-        else
-        {
-            hammingCode[i] = 1;
-        }
-    }
-
-    // Return the generated code
-    return hammingCode;
-}
-
-// Function to find the hamming code
-// of the given message bit msgBit[]
-void Node::findHammingCode(vector<int> &msgBit)
-{
-
-    // Message bit size
-    int m = msgBit.size();
-
-    // r is the number of redundant bits
-    int r = 1;
-
-    // Find no. of redundant bits
-    while (pow(2, r) < (m + r + 1))
-    {
-        r++;
-    }
-
-    // Generating Code
-    vector<int> ans = generateHammingCode(msgBit, m, r);
-
-    // Print the code
-    cout << "Message bits are: ";
-    for (int i = 0; i < msgBit.size(); i++)
-        cout << msgBit[i] << " ";
-
-    cout << "\nHamming code is: ";
-    for (int i = 0; i < ans.size(); i++)
-        cout << ans[i] << " ";
-}
-
-string Node::hamming(string payload)
-{
-
-    cout << "payload size is  " << payload.size() << "\n";
     int r = 0;
     int parity;
-    while (((payload.size()) + 1 + r) >= pow(2, r))
-    { ////finding the redundant bits
+    while (((payload.size()) + 1 + r) >= pow(2, r)) // Finding the redundant bits
+    {
         r++;
     }
-    cout << " r is " << r << "\n";
 
-    int Pbits_position[r]; //// identifying the p bits location
+    int Pbits_position[r]; // Identifying the p bits location
     for (int i = 0; i < r; i++)
     {
 
@@ -908,7 +753,8 @@ string Node::hamming(string payload)
     int j = 0;
     int k = 0;
     for (int i = 1; i <= payload.size() + r; i++)
-    { ///compose a message of data + parity (parity still not calculated)
+    {
+        // Compose a message of data + parity (parity still not calculated)
         if (i == Pbits_position[j])
         {
             msg_plus_parity[i] = -1;
@@ -923,7 +769,7 @@ string Node::hamming(string payload)
 
     k = 0;
     int x, min, max = 0;
-    //finding parity bit
+    // Finding parity bit
     for (int i = 1; i <= payload.size() + r; i = pow(2, k))
     {
         k++;
@@ -944,7 +790,7 @@ string Node::hamming(string payload)
             min = 1;
         }
 
-        //checking for even parity
+        // Checking for even parity
         if (parity % 2 == 0)
         {
             msg_plus_parity[i] = 0;
@@ -963,164 +809,78 @@ string Node::hamming(string payload)
     return temp.str();
 }
 
-void Node::sendNextMessage(int msg_id)
+string Node::correctMsgUsingHammingCode(string payload)
 {
-    if (messages.empty())
+    int k = 0;
+    int j = 0;
+    int z = 0;
+    int error_pos = 0;
+    int x, min, max = 0;
+    bitset<1> parity(0);
+
+    // Finding parity bit
+    for (int i = 1; i <= payload.size(); i = pow(2, k))
     {
-        double total_time = simTime().dbl() - start_transmission_time;
-        string str_1 = "node" + std::to_string(index) + " end of input file\n";
-        string str_2 = "Total transmission time = " + std::to_string(simTime().dbl() - start_transmission_time) + "\n";
-        string str_3 = "Total number of transmissions = " + std::to_string(transmissions_number) + "\n";
-        string str_4 = "The network throughput = " + std::to_string(expected_total_transmissions / total_time) + "\n";
-
-        EV << "..............................................." << endl;
-        EV << str_1;
-        EV << str_2;
-        EV << str_3;
-        EV << str_4 << endl
-           << endl;
-        //-------------------------------------------------
-        std::cout << "..............................................." << endl;
-        std::cout << str_1;
-        std::cout << str_2;
-        std::cout << str_3;
-        std::cout << str_4 << endl
-                  << endl;
-        //--------------------------------------------------
-        out_file.open(file_name, std::ios_base::app);
-        out_file << "...............................................\n";
-        out_file << str_1.c_str();
-        out_file << str_2.c_str();
-        out_file << str_3.c_str();
-        out_file << str_4.c_str();
-        out_file.close();
-
-        endSimulation();
-    }
-
-    std::pair<std::string, std::string> msg_payload_to_send = messages.front();
-    messages.pop();
-    std::string framed_payload = frameMessage(msg_payload_to_send.second);
-    std::bitset<8> CRC_byte = calculateCRC(framed_payload);
-
-    // Checking for errors
-    std::string string_to_print = "node";
-    string_to_print += std::to_string(index);
-    string_to_print += " sends message with id=";
-    string_to_print += std::to_string(msg_id);
-    string_to_print += " and content='";
-    string_to_print += framed_payload;
-    string_to_print += "' at ";
-    string_to_print += std::to_string(simTime().dbl());
-
-    if (msg_payload_to_send.first[0] == '1') // Modification
-    {
-        framed_payload = introduceErrorToPayload(framed_payload);
-        string_to_print += " with modification";
-    }
-    MyMessage_Base *msg_to_send = prepareMessageToSend(framed_payload, msg_id, simTime().dbl(), CRC_byte, 0, 0);
-    double time_delay_of_msg = par("prop_delay").doubleValue();
-
-    if (msg_payload_to_send.first[2] == '1') // Duplicated
-    {
-        double time_difference = 0.01;
-        sendDelayed(msg_to_send->dup(), time_delay_of_msg + time_difference, "out_pair");
-        transmissions_number++;
-    }
-
-    if (msg_payload_to_send.first[3] == '1') // Delay
-    {
-        time_delay_of_msg += par("delay_amount").doubleValue();
-    }
-
-    if (msg_payload_to_send.first[1] == '1') // Loss. Do not send
-    {
-    }
-    else // Send
-    {
-        sendDelayed(msg_to_send, time_delay_of_msg, "out_pair");
-    }
-    string_to_print += "\n";
-    EV << string_to_print;
-    std::cout << string_to_print;
-    out_file.open(file_name, std::ios_base::app);
-    out_file << string_to_print;
-    out_file.close();
-    transmissions_number++;
-
-    // Setting the timeout event
-    timeoutEvent = new MyMessage_Base("timeout");
-
-    scheduleAt(simTime() + par("timeout"), timeoutEvent);
-}
-void Node::receiveMessage(MyMessage_Base *received_msg)
-{
-    // Double msg check
-    std::string payload = received_msg->getMessage_Payload();
-    std::bitset<8> checkbits = received_msg->getTrailer();
-    std::bitset<8> reminderRec = calculateCRC(payload + (char)checkbits.to_ulong());
-
-    std::string string_to_print = "node";
-    string_to_print += std::to_string(index);
-    string_to_print += " received message with id=";
-    string_to_print += std::to_string(received_msg->getMessage_ID());
-    string_to_print += " and content='";
-    string_to_print += payload;
-    string_to_print += "' at ";
-    string_to_print += std::to_string(simTime().dbl());
-
-    // CRC check
-    if (reminderRec != std::bitset<8>("00000000")) // No error. Send positive ack
-    {
-        string_to_print += " with modification";
-    }
-    string_to_print += "\n";
-    EV << string_to_print;
-    std::cout << string_to_print;
-    out_file.open(file_name, std::ios_base::app);
-    out_file << string_to_print.c_str();
-    out_file.close();
-    if (last_msg_id + 1 <= received_msg->getMessage_ID())
-    {
-        // CRC check
-        if (reminderRec == std::bitset<8>("00000000")) // No error. Send positive ack
+        k++;
+        parity = 0;
+        j = i;
+        x = i;
+        min = 1;
+        max = i;
+        while (j <= payload.size())
         {
-            MyMessage_Base *msg_to_send = prepareMessageToSend("Ack", received_msg->getMessage_ID(), simTime().dbl(), 0, 0, 1);
-            sendDelayed(msg_to_send, par("prop_delay"), "out_pair");
+            for (x = j; max >= min && x <= payload.size(); min++, x++)
+            {
+                parity ^= payload[x - 1];
+            }
+            j = x + i;
+            min = 1;
         }
-        else // Error detected. Send negative ack
-        {
-            MyMessage_Base *msg_to_send = prepareMessageToSend("NAck", received_msg->getMessage_ID(), simTime().dbl(), 0, 0, -1);
-            sendDelayed(msg_to_send, par("prop_delay"), "out_pair");
-        }
-        last_msg_id = received_msg->getMessage_ID();
+        error_pos += (int)parity.to_ulong() * pow(2, z);
+        z++;
     }
-    else
+    error_position = error_pos;
+    if (error_pos > 0 && payload[error_pos - 1] == '0')
     {
-
-        std::string string_to_print = "node";
-        string_to_print += std::to_string(index);
-        string_to_print += " drops message with id=";
-        string_to_print += std::to_string(received_msg->getMessage_ID());
-        string_to_print += "\n";
-        EV << string_to_print;
-        std::cout << string_to_print;
-        out_file.open(file_name, std::ios_base::app);
-        out_file << string_to_print.c_str();
-        out_file.close();
-        MyMessage_Base *msg_to_send = prepareMessageToSend("Drop msg with id= " + std::to_string(received_msg->getMessage_ID()), received_msg->getMessage_ID(), simTime().dbl(), 0, 0, -2);
-        sendDelayed(msg_to_send, par("prop_delay"), "out_pair");
+        payload[error_pos - 1] = '1';
     }
+    else if (error_pos > 0 && payload[error_pos - 1] == '1')
+    {
+        payload[error_pos - 1] = '0';
+    }
+
+    //stringstream temp_msg;
+    string msg_received = "";
+    int m = 0;
+
+    for (int i = 1; i <= payload.size(); i++)
+    {
+        if (i == pow(2, m))
+        {
+            m++;
+        }
+        else
+        {
+            msg_received = msg_received + payload[i - 1];
+        }
+    }
+    return msg_received;
 }
 
-MyMessage_Base *Node::prepareMessageToSend(string payload, int message_id, double sending_time, bits trailer, int piggybacking_id, int piggybacking)
+string Node::removeHammingBits(string payload)
 {
-    MyMessage_Base *msg_to_send = new MyMessage_Base(payload.c_str());
-    msg_to_send->setMessage_ID(message_id);
-    msg_to_send->setMessage_Payload(payload.c_str());
-    msg_to_send->setPiggybacking_ID(piggybacking_id);
-    msg_to_send->setPiggybacking(piggybacking);
-    msg_to_send->setSending_Time(sending_time);
-    msg_to_send->setTrailer(trailer);
-    return msg_to_send;
+    string msg_received = "";
+    int m = 0;
+    for (int i = 1; i <= payload.size(); i++)
+    {
+        if (i == pow(2, m))
+        {
+            m++;
+        }
+        else
+        {
+            msg_received = msg_received + payload[i - 1];
+        }
+    }
+    return msg_received;
 }
