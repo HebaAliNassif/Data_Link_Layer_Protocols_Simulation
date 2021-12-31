@@ -32,76 +32,113 @@ enum event_type
   cksum_err,
   timeout,
   network_layer_ready,
-  ack_timeout
+  ack_timeout,
+  data_finished
 };
-
+enum print_mode
+{
+  sender_,
+  receiver_,
+  timeout_,
+  drop_
+};
 class Node : public cSimpleModule
 {
-  std::queue<std::pair<std::string, std::string>> messages;
-  ofstream out_file;
-  std::string file_name;
+  
+  std::queue<std::pair<std::string, std::string>> messages; // Queue of msgs that was read from the input file
+  ofstream out_file;                                        // Outfile pointer
+  std::string file_name;                                    // Outfile name
 
-  int index;
-  int last_msg_id = -1;
-
+  int index;                                                // Index of the currend node
+   
+  // Statistics variables
   int start_transmission_time = -1;
   int transmissions_number = 0;
   int expected_total_transmissions = 0;
 
+  int nr_bufs;                                              // Number of buffers i.e window size (window size is half of max_seq_number)
+  int max_seq_number;                                       // Max seq number (2^n - 1)
+
+  // Sender variables
+  int ack_expected;                                         // Lower edge of sender's window
+  int next_frame_to_send;                                   // Upper edge of sender's window + 1
+  std::vector<std::pair<std::string, std::string>> out_buf; // Buffers for the outbound stream
+  int nbuffered;                                            // How many output buffers currently used
+
+
+  // Receiver variables
+  int frame_expected;                                       // Lower edge of receiver's window
+  int too_far;                                              // Upper edge of receiver's window + 1
+  std::vector<MyMessage_Base *> in_buf;                     // Buffers for the inbound stream
+  std::vector<bool> arrived;                                // Inbound bit map
+
+  int i;                                                    // Index ito buffer bool
+
+  MyMessage_Base * received_frame;
   std::vector<MyMessage_Base *> timeoutBuffer;
   MyMessage_Base *timeoutEvent;
-
-  // Phase 2
-  int ack_expected;
-  int next_frame_to_send;
-  int frame_expected;
-  int too_far;
-  //int i;
-  MyMessage_Base *received_frame;
-  std::vector<std::pair<std::string, std::string>> out_buf;
-  std::vector<MyMessage_Base *> in_buf;
-  int nr_bufs;
-  int max_seq_number;
-
-  std::vector<bool> arrived;
-  int nbuffered;
-  int oldest_frame;
-  //event_type event;
-
   MyMessage_Base *ack_timer;
+
+  bool peer_finished = false;
+  //Phase 1
+  int last_msg_id = -1;
 
 protected:
   virtual void initialize();
   virtual void handleMessage(cMessage *msg);
-  void sendNextMessage(int msg_id);
-  void receiveMessage(MyMessage_Base *msg);
-  MyMessage_Base *prepareMessageToSend(string payload, int message_id, double sending_time = 0, bits trailer = 0, int piggybacking_id = 0, int piggybacking = 0);
-  void initializeMessageArray(string file_name);
-  std::string frameMessage(std::string str);
+
+  // Network methods
+  void receiveFrame(MyMessage_Base *mmsg);
+  void sendFrame(int frame_kind, int frame_num, int frame_exp);
+
+  bool fromNetworkLayer(std::pair<std::string, std::string> *);
+  void toNetworkLayer(MyMessage_Base *msg_received);
+
+  void fromPhysicalLayer(MyMessage_Base *msg_received);
+  void toPhysicalLayer(MyMessage_Base *msg_to_send, std::string error_bits);
+
+  void startAckTimer();
+  void stopAckTimer();
+
+  void startDataTimer(int frame_num);
+  void stopDataTimer(int frame_num);
+
+  void finishMsg();
+  
+  // Helper Methods
+  void inc(int&seq, int op);
   vector<string> stringSplit(const string &str);
+  std::string stringInBits(std::string str);
+  std::string frameMessage(std::string str);
+  bool between(int sf, int si, int sn); // Check if sf <= si < sn
+
+  // File Methods
   void initializeFile();
+  void initializeMessageArray(string file_name);
+
   // Error Methods
   std::string introduceErrorToPayload(string payload);
+
   // CRC Methods
   std::bitset<8> calculateCRC(std::string msg);
   string mod2div(string divident, string divisor);
   string xor1(string a, string b);
 
-  void receiveMessageFromPeer(MyMessage_Base *mmsg);
+  // Printing Methods
+  void printNodeVariables();
+  void printStatistics();
+  void printNode(MyMessage_Base *msg, int print_mode, bool error);
 
-  bool from_network_layer(std::pair<std::string, std::string> *);
-  void send_frame(int frame_kind, int frame_num, int frame_exp);
-  void to_physical_layer(MyMessage_Base *msg_to_send, std::string error_bits);
-  void start_ack_timer();
-  void stop_ack_timer();
-  void start_timer(int frame_num);
-  void stop_timer(int frame_num);
-  void inc(int &seq, int operation);
+  // Hamming code Methods
+  //std::string getHammingCode(std::string msgBits);
+  void findHammingCode(vector<int> &msgBit);
+  vector<int> generateHammingCode(vector<int> msgBits, int m, int r);
+  string hamming(string payload);
 
-  void from_physical_layer(MyMessage_Base *msg_received);
-
-  bool between(int sf, int si, int sn); // Check if sf <= si < sn
-  void printValues();
+  // Phase 1
+  void sendNextMessage(int msg_id);
+  void receiveMessage(MyMessage_Base *msg);
+  MyMessage_Base *prepareMessageToSend(string payload, int message_id, double sending_time = 0, bits trailer = 0, int piggybacking_id = 0, int piggybacking = 0);
 };
 
 #endif

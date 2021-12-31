@@ -26,6 +26,7 @@ simple Node
     int window_size;
     double timeout_ack;
     double interval_between_msgs;
+    bool hamming;
      gates:
         input in_pair;
         input in_coordinator;

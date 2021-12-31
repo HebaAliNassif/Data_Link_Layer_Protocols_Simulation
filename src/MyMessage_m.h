@@ -88,8 +88,9 @@ class MyMessage_Base : public ::omnetpp::cPacket
 
   public:
     // make constructors protected to avoid instantiation
-        MyMessage_Base(const char *name=nullptr, short kind=0);
-        MyMessage_Base(const MyMessage_Base& other);
+    MyMessage_Base(const char *name=nullptr, short kind=0);
+    MyMessage_Base(const MyMessage_Base& other);
+
     virtual ~MyMessage_Base();
     virtual MyMessage_Base *dup() const override {return new MyMessage_Base(*this);}
     virtual void parsimPack(omnetpp::cCommBuffer *b) const override;
