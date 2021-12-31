@@ -135,7 +135,7 @@ protected:
   // Printing Methods
   void printNodeVariables();
   void printStatistics();
-  void printNode(MyMessage_Base *msg, int print_mode, bool error);
+  bool handleFrame(MyMessage_Base *msg, int print_mode, bool error);
 
   // Hamming code Methods
   string generateHammingCode(string payload);

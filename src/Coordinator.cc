@@ -45,18 +45,23 @@ void Coordinator::initialize()
         MyMessage_Base *mmsg = new MyMessage_Base((char*)"Initialization");
         mmsg->setMessage_Payload(line.c_str());
 
-        if(node_index>=2)return;
         mmsg->setMessage_ID(-1);        // -1 for indicates initialization
 
         // Sending the information to the intended node.
         send(mmsg, "outs_nodes", node_index);
     }
+    pairs_count = (node_index + 1)/2;
     inFile.close();
 }
 
 void Coordinator::handleMessage(cMessage *msg)
 {
     // TODO - Generated method body
+    finished_pairs++;
+    if(pairs_count == finished_pairs)
+    {
+        endSimulation();
+    }
 }
 
 vector<string> Coordinator::stringSplit(const string &str)

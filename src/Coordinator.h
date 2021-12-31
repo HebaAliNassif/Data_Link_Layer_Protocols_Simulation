@@ -27,6 +27,9 @@ using namespace omnetpp;
  */
 class Coordinator : public cSimpleModule
 {
+  int pairs_count = 0;
+  int finished_pairs = 0;
+   
   protected:
     virtual void initialize();
     virtual void handleMessage(cMessage *msg);

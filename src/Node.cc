@@ -85,12 +85,13 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
 {
     EV << "On Enter: " << endl;
     printNodeVariables();
+    bool corrupted_msg;
     switch (mmsg->getEvent())
     {
     case frame_arrival: // A data or control frame has arrived
         EV << "Receiver: \nEvent: " << mmsg->getEvent() << "\t Message ID: " << mmsg->getMessage_ID() << "\t Payload: " << mmsg->getMessage_Payload() << "\t Piggybacking: " << mmsg->getPiggybacking() << "\t Piggybacking ID: " << mmsg->getPiggybacking_ID() << "\t Trailer: " << mmsg->getTrailer() << endl;
-        printNode(mmsg, receiver_, false);
         fromPhysicalLayer(mmsg);
+        corrupted_msg = handleFrame(received_frame, receiver_, false);
         if (received_frame->getPiggybacking() == 0) // Data
         {
             if (received_frame->getMessage_ID() != frame_expected && no_nak && between(frame_expected, received_frame->getMessage_ID(), too_far))
@@ -100,7 +101,7 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
             }
             else if(!between(frame_expected, received_frame->getMessage_ID(), too_far))
             {
-                printNode(received_frame, drop_, false);
+                handleFrame(received_frame, drop_, false);
             }
             else // Restart ACK timer every time we receive out of order frame (to be able to send cumulative ack)
             {
@@ -108,23 +109,30 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
             }
             if (between(frame_expected, received_frame->getMessage_ID(), too_far) && arrived[received_frame->getMessage_ID() % nr_bufs] == false) // Check if the msg is within the window and didn't arrive before
             {
-                arrived[received_frame->getMessage_ID() % nr_bufs] = true; // Mark as arrived
-                in_buf[received_frame->getMessage_ID() % nr_bufs] = mmsg;  // Add to the input buffer
-                while (arrived[frame_expected % nr_bufs])                  // Deliver contiguous packet sequence to network layer starting from bottom of receiver window
+                if(corrupted_msg == false)
                 {
-                    toNetworkLayer(received_frame);
-                    no_nak = true; // Allow sending NAK because we send NAK for frame_expected and frame_expected will be incremented soon
-                    arrived[frame_expected % nr_bufs] = false;
-                    // Window Sliding
-                    inc(frame_expected); // Advance lower edge of receiver's window
-                    inc(too_far);        // Advance upper edge of receiver's window
-                    startAckTimer();  // To see if a separate ack is needed
+                    arrived[received_frame->getMessage_ID() % nr_bufs] = true; // Mark as arrived
+                    in_buf[received_frame->getMessage_ID() % nr_bufs] = mmsg;  // Add to the input buffer
+                    while (arrived[frame_expected % nr_bufs])                  // Deliver contiguous packet sequence to network layer starting from bottom of receiver window
+                    {
+                        toNetworkLayer(received_frame);
+                        no_nak = true; // Allow sending NAK because we send NAK for frame_expected and frame_expected will be incremented soon
+                        arrived[frame_expected % nr_bufs] = false;
+                        // Window Sliding
+                        inc(frame_expected); // Advance lower edge of receiver's window
+                        inc(too_far);        // Advance upper edge of receiver's window
+                        startAckTimer();  // To see if a separate ack is needed
+                    }
+                }
+                else
+                {
+                    sendFrame(-1, 0, received_frame->getMessage_ID(), false); // Type Nak
                 }
             }
             else if (arrived[received_frame->getMessage_ID() % nr_bufs] == true) // Check duplicate msg
             {
                 // Drop the msg
-                printNode(received_frame, drop_, false);
+                handleFrame(received_frame, drop_, false);
             }
         }
 
@@ -152,7 +160,7 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
         }
         break;
     case timeout:
-        printNode(mmsg, timeout_, false);
+        handleFrame(mmsg, timeout_, false);
         sendFrame(0, mmsg->getMessage_ID(), frame_expected, false);
         break;
     case network_layer_ready: // Accept, save, and transmit a new frame
@@ -237,9 +245,9 @@ void Node::sendFrame(int frame_kind, int frame_num, int frame_exp, bool resend)
         toPhysicalLayer(msg_to_send, out_buf[frame_num % nr_bufs].first); // transmit the frame
 
         if (out_buf[frame_num % nr_bufs].first[0] == '1')
-            printNode(msg_to_send, sender_, true);
+            handleFrame(msg_to_send, sender_, true);
         else
-            printNode(msg_to_send, sender_, false);
+            handleFrame(msg_to_send, sender_, false);
         out_buf[frame_num % nr_bufs].first = "0000";
 
         if(!resend)
@@ -249,7 +257,7 @@ void Node::sendFrame(int frame_kind, int frame_num, int frame_exp, bool resend)
     {
         toPhysicalLayer(msg_to_send, "0000"); // transmit the frame
 
-        printNode(msg_to_send, sender_, false);
+        handleFrame(msg_to_send, sender_, false);
     }
     stopAckTimer(); // No need to send separate ack, i.e already sent
 
@@ -353,7 +361,9 @@ void Node::checkEndOfTransmission()
     else if (messages.empty() && ack_expected == next_frame_to_send && nbuffered == 0 && peer_finished == true) // If the peer finished, then end the simulation
     {
         printStatistics();
-        endSimulation();
+        MyMessage_Base *msg_to_send = new MyMessage_Base("Finished");
+        msg_to_send->setEvent(data_finished);
+        sendDelayed(msg_to_send, 0, "out_coordinator");
     }
 }
 
@@ -636,12 +646,11 @@ void Node::printStatistics()
     out_file << str_3.c_str();
     out_file << str_4.c_str();
     out_file.close();
-
-    endSimulation();
 }
 
-void Node::printNode(MyMessage_Base *msg, int print_mode, bool error)
+bool Node::handleFrame(MyMessage_Base *msg, int print_mode, bool error)
 {
+    bool error_found = false;
     std::string string_to_print = "";
     std::string content;
     std::bitset<8> checkbits = msg->getTrailer();
@@ -665,6 +674,7 @@ void Node::printNode(MyMessage_Base *msg, int print_mode, bool error)
         if (par("hamming").boolValue() == false && content != "" && calculateCRC(content + (char)checkbits.to_ulong()) != std::bitset<8>("00000000"))
         {
             string_to_print += " with modification";
+            error_found = true;
         }
 
         if (msg->getPiggybacking() == -1)
@@ -738,11 +748,13 @@ void Node::printNode(MyMessage_Base *msg, int print_mode, bool error)
     }
     //EV << string_to_print << endl << endl;
     //-------------------------------------------------
-    std::cout << string_to_print << endl << endl;
+    //std::cout << string_to_print << endl << endl;
     //--------------------------------------------------
     out_file.open(file_name, std::ios_base::app);
     out_file << string_to_print.c_str() << endl;
     out_file.close();
+
+    return error_found;
 }
 
 string Node::generateHammingCode(string payload)

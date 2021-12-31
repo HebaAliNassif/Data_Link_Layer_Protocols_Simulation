@@ -31,5 +31,6 @@ simple Node
      gates:
         input in_pair;
         input in_coordinator;
+        output out_coordinator;
         output out_pair;
 }

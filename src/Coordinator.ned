@@ -22,4 +22,5 @@ simple Coordinator
 {
     gates:
         output outs_nodes[];
+        input inputs_nodes[];
 }

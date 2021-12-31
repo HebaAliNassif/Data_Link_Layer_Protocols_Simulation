@@ -17,6 +17,7 @@ network Network
     connections:
         for i=0..sizeof(nodes)-1 {
             nodes[i].in_coordinator <-- IdealChannel <-- coordinator.outs_nodes++;
+            coordinator.inputs_nodes++ <-- IdealChannel <-- nodes[i].out_coordinator;
         }
         //nodes[0].in_pair <-- IdealChannel <-- nodes[1].out_pair;
         //nodes[1].in_pair <-- IdealChannel <-- nodes[0].out_pair;
