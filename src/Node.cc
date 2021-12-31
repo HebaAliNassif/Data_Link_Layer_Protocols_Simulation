@@ -33,7 +33,7 @@ bool no_nak = true;
 Define_Module(Node);
 void Node::initialize()
 {
-    // TODO - Generated method body
+    transmissions_number = 0;
     nr_bufs = par("window_size").intValue();
     max_seq_number = 2 * nr_bufs - 1;
     ack_expected = 0;
@@ -48,10 +48,7 @@ void Node::initialize()
         in_buf.push_back(new MyMessage_Base());
         timeoutBuffer.push_back(nullptr);
     }
-    timeoutEvent = new MyMessage_Base("timeout");
-    timeoutEvent->setEvent(timeout);
     ack_timer = nullptr;
-    std::cout << bitsToString(stringToBits("Hi")) << endl;
 }
 
 void Node::handleMessage(cMessage *msg)
@@ -86,19 +83,24 @@ void Node::handleMessage(cMessage *msg)
 
 void Node::receiveFrame(MyMessage_Base *mmsg)
 {
-    //EV << "On Enter: " << endl;
-    //printNodeVariables();
+    EV << "On Enter: " << endl;
+    printNodeVariables();
     switch (mmsg->getEvent())
     {
     case frame_arrival: // A data or control frame has arrived
+        EV << "Receiver: \nEvent: " << mmsg->getEvent() << "\t Message ID: " << mmsg->getMessage_ID() << "\t Payload: " << mmsg->getMessage_Payload() << "\t Piggybacking: " << mmsg->getPiggybacking() << "\t Piggybacking ID: " << mmsg->getPiggybacking_ID() << "\t Trailer: " << mmsg->getTrailer() << endl;
         printNode(mmsg, receiver_, false);
         fromPhysicalLayer(mmsg);
         if (received_frame->getPiggybacking() == 0) // Data
         {
-            if (received_frame->getMessage_ID() != frame_expected && no_nak)
+            if (received_frame->getMessage_ID() != frame_expected && no_nak && between(frame_expected, received_frame->getMessage_ID(), too_far))
             {
                 // We did NOT receive the lower end of receive window => Send NAK immediately
-                sendFrame(-1, 0, frame_expected); // Type Nak
+                sendFrame(-1, 0, frame_expected, false); // Type Nak
+            }
+            else if(!between(frame_expected, received_frame->getMessage_ID(), too_far))
+            {
+                printNode(received_frame, drop_, false);
             }
             else // Restart ACK timer every time we receive out of order frame (to be able to send cumulative ack)
             {
@@ -114,8 +116,8 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
                     no_nak = true; // Allow sending NAK because we send NAK for frame_expected and frame_expected will be incremented soon
                     arrived[frame_expected % nr_bufs] = false;
                     // Window Sliding
-                    frame_expected++; // Advance lower edge of receiver's window
-                    too_far++;        // Advance upper edge of receiver's window
+                    inc(frame_expected); // Advance lower edge of receiver's window
+                    inc(too_far);        // Advance upper edge of receiver's window
                     startAckTimer();  // To see if a separate ack is needed
                 }
             }
@@ -129,40 +131,40 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
         if (received_frame->getPiggybacking() == -1) // Nak
         {
             int resend_seq_num = (received_frame->getPiggybacking_ID() + 1) % (max_seq_number + 1);
-            if (between(ack_expected % (max_seq_number + 1), resend_seq_num, next_frame_to_send % (max_seq_number + 1)))
+            if (between(ack_expected, resend_seq_num, next_frame_to_send ))
             {
-                sendFrame(0, resend_seq_num, frame_expected); //resend frame
+                sendFrame(0, resend_seq_num, frame_expected, true); // resend frame
             }
         }
 
         // Checking for ack receiving (ACK means all frames in the contiguous sequence of frames before and including ACKed frame have been received)
-        while (between(ack_expected % (max_seq_number + 1), received_frame->getPiggybacking_ID(), next_frame_to_send % (max_seq_number + 1)))
+        while (between(ack_expected , received_frame->getPiggybacking_ID(), next_frame_to_send))
         {
             nbuffered--;                 // Free buffer (out buffer)
             stopDataTimer(ack_expected); // Stop retransmit timer
-            ack_expected++;              // Advance lower edge of sender's window
+            inc(ack_expected);              // Advance lower edge of sender's window
         }
         break;
     case cksum_err:
         if (no_nak)
         {
-            sendFrame(-1, 0, frame_expected);
+            sendFrame(-1, 0, frame_expected, false);
         }
         break;
     case timeout:
         printNode(mmsg, timeout_, false);
-        sendFrame(0, mmsg->getMessage_ID(), frame_expected);
+        sendFrame(0, mmsg->getMessage_ID(), frame_expected, false);
         break;
     case network_layer_ready: // Accept, save, and transmit a new frame
         if (nbuffered < nr_bufs && fromNetworkLayer(&out_buf[next_frame_to_send % nr_bufs]))
         {
             nbuffered++;
-            sendFrame(0, next_frame_to_send, frame_expected); // Type data
-            next_frame_to_send++;
+            sendFrame(0, next_frame_to_send, frame_expected, false); // Type data
+            inc(next_frame_to_send);
         }
         break;
     case ack_timeout: // Ack timer expired => send ack
-        sendFrame(1, 0, frame_expected);
+        sendFrame(1, 0, frame_expected, false);
         break;
     case data_finished: // Peer finished transmission
         peer_finished = true;
@@ -180,13 +182,13 @@ void Node::receiveFrame(MyMessage_Base *mmsg)
         disableNetworkLayer();
     }
 
-    //EV << "On Leave: " << endl;
-    //printNodeVariables();
+    EV << "On Leave: " << endl;
+    printNodeVariables();
 
     checkEndOfTransmission();
 }
 
-void Node::sendFrame(int frame_kind, int frame_num, int frame_exp)
+void Node::sendFrame(int frame_kind, int frame_num, int frame_exp, bool resend)
 {
     std::string payload;
     std::bitset<8> CRC_byte;
@@ -239,7 +241,9 @@ void Node::sendFrame(int frame_kind, int frame_num, int frame_exp)
         else
             printNode(msg_to_send, sender_, false);
         out_buf[frame_num % nr_bufs].first = "0000";
-        startDataTimer(frame_num);
+
+        if(!resend)
+            startDataTimer(frame_num);
     }
     else
     {
@@ -249,7 +253,7 @@ void Node::sendFrame(int frame_kind, int frame_num, int frame_exp)
     }
     stopAckTimer(); // No need to send separate ack, i.e already sent
 
-    //EV << "Sender: \nEvent: " << msg_to_send->getEvent() << "\t Message ID: " << msg_to_send->getMessage_ID() << "\t Payload: " << msg_to_send->getMessage_Payload() << "\t Piggybacking: " << msg_to_send->getPiggybacking() << "\t Piggybacking ID: " << msg_to_send->getPiggybacking_ID() << "\t Trailer: " << msg_to_send->getTrailer() << endl;
+    EV << "Sender: \nEvent: " << msg_to_send->getEvent() << "\t Message ID: " << msg_to_send->getMessage_ID() << "\t Payload: " << msg_to_send->getMessage_Payload() << "\t Piggybacking: " << msg_to_send->getPiggybacking() << "\t Piggybacking ID: " << msg_to_send->getPiggybacking_ID() << "\t Trailer: " << msg_to_send->getTrailer() << endl;
 }
 
 bool Node::fromNetworkLayer(std::pair<std::string, std::string> *msg)
@@ -301,9 +305,9 @@ void Node::toPhysicalLayer(MyMessage_Base *msg_to_send, std::string error_bits)
 
 void Node::startAckTimer()
 {
-    //EV << "Restart ack timer" << endl;
+    EV << "Restart ack timer" << endl;
     stopAckTimer();
-    //EV << "Start ack timer" << endl;
+    EV << "Start ack timer" << endl;
     ack_timer = new MyMessage_Base();
     ack_timer->setEvent(ack_timeout);
     scheduleAt(simTime() + par("timeout_ack").doubleValue(), ack_timer);
@@ -313,7 +317,7 @@ void Node::stopAckTimer()
 {
     if (ack_timer != nullptr)
     {
-        //EV << "Stop current ack timer" << endl;
+        EV << "Stop current ack timer" << endl;
         cancelAndDelete(ack_timer);
     }
     ack_timer = nullptr;
@@ -321,7 +325,7 @@ void Node::stopAckTimer()
 
 void Node::startDataTimer(int frame_num)
 {
-    //EV << "Start data timer for msg with frame number = " << frame_num << endl;
+    EV << "Start data timer for msg with frame number = " << frame_num << endl;
 
     MyMessage_Base *currentTimeout = new MyMessage_Base("timeout");
 
@@ -335,18 +339,18 @@ void Node::startDataTimer(int frame_num)
 
 void Node::stopDataTimer(int frame_num)
 {
-    //EV << "Stop data timer for msg with frame number = " << frame_num << endl;
+    EV << "Stop data timer for msg with frame number = " << frame_num << endl;
     cancelAndDelete(timeoutBuffer[frame_num % nr_bufs]);
 }
 
 void Node::checkEndOfTransmission()
 {
     // Check if the node finished sending all the messages in the input file and received their acknowledgement
-    if (ack_expected == expected_total_transmissions && peer_finished == false) // If the peer didn't finished, then msg the send a finish msg to the peer
+    if (messages.empty() && nbuffered == 0 && peer_finished == false) // If the peer didn't finished, then msg the send a finish msg to the peer
     {
         finishMsg();
     }
-    else if (ack_expected == expected_total_transmissions && peer_finished == true) // If the peer finished, then end the simulation
+    else if (messages.empty() && ack_expected == next_frame_to_send && nbuffered == 0 && peer_finished == true) // If the peer finished, then end the simulation
     {
         printStatistics();
         endSimulation();
@@ -357,7 +361,7 @@ void Node::finishMsg()
 {
     MyMessage_Base *msg_to_send = new MyMessage_Base("Finished");
     msg_to_send->setEvent(data_finished);
-    sendDelayed(msg_to_send, 0.01, "out_pair");
+    sendDelayed(msg_to_send, 0, "out_pair");
 }
 
 void Node::enableNetworkLayer()
@@ -369,6 +373,14 @@ void Node::enableNetworkLayer()
 
 void Node::disableNetworkLayer()
 {
+}
+
+void Node::inc(int & number)
+{
+    if (number < max_seq_number)
+        number = number + 1; 
+    else 
+        number = 0;
 }
 
 vector<string> Node::stringSplit(const string &str)
@@ -577,8 +589,8 @@ void Node::printNodeVariables()
     EV << "frame_expected: " << frame_expected << "\t too_far: " << too_far << endl
        << "in_buf: " << endl;
     for (int j = 0; j < nr_bufs; j++)
-        EV << in_buf[j]->getMessage_Payload() << "\t";
-    EV << "arrived: " << endl;
+        EV << bitsToString(correctMsgUsingHammingCode(in_buf[j]->getMessage_Payload())) << "\t";
+    EV <<endl<< "arrived: " << endl;
     for (int j = 0; j < nr_bufs; j++)
         EV << arrived[j] << "\t";
     EV << endl;
@@ -707,13 +719,13 @@ void Node::printNode(MyMessage_Base *msg, int print_mode, bool error)
             string_to_print += std::to_string(msg->getPiggybacking_ID());
         }
         break;
-    case (timeout_):
+    case (drop_):
         string_to_print = "node";
         string_to_print += std::to_string(index);
         string_to_print += " drops message with id=";
         string_to_print += std::to_string(msg->getMessage_ID());
         break;
-    case (drop_):
+    case (timeout_):
         string_to_print = "node";
         string_to_print += std::to_string(index);
         string_to_print += " timeout for message id=";

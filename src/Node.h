@@ -78,7 +78,6 @@ class Node : public cSimpleModule
 
   MyMessage_Base * received_frame;
   std::vector<MyMessage_Base *> timeoutBuffer;
-  MyMessage_Base *timeoutEvent;
   MyMessage_Base *ack_timer;
 
   bool peer_finished = false;
@@ -91,7 +90,7 @@ protected:
 
   // Network methods
   void receiveFrame(MyMessage_Base *mmsg);
-  void sendFrame(int frame_kind, int frame_num, int frame_exp);
+  void sendFrame(int frame_kind, int frame_num, int frame_exp, bool resend);
 
   bool fromNetworkLayer(std::pair<std::string, std::string> *);
   void toNetworkLayer(MyMessage_Base *msg_received);
@@ -110,6 +109,9 @@ protected:
 
   void enableNetworkLayer();
   void disableNetworkLayer();
+
+  void inc(int & number);
+
   
   // Helper Methods
   vector<string> stringSplit(const string &str);
